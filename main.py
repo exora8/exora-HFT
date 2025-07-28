@@ -79,10 +79,10 @@ def verify_bingx_api(api_key, secret_key):
     except Exception as e:
         return f"Gagal terhubung: Terjadi exception - {e}"
 
-# --- PERBAIKAN FINAL DI SINI ---
+# --- PERBAIKAN NAMA PARAMETER DI SINI ---
 def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, tp_price=None, sl_price=None):
     """
-    Membuat order di BingX dengan metode pembuatan URL yang eksplisit dan anti-gagal.
+    Membuat order di BingX dengan nama parameter TP/SL yang sudah diperbaiki.
     """
     endpoint = "/openApi/swap/v2/trade/order"
     base_url = f"{BINGX_API_URL}{endpoint}"
@@ -92,32 +92,24 @@ def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, 
         'side': 'BUY' if side.lower() == 'buy' else 'SELL',
         'positionSide': 'BOTH',
         'type': order_type.upper(),
-        'quantity': f"{quantity:.5f}", # Menggunakan format string untuk presisi
+        'quantity': f"{quantity:.5f}",
         'timestamp': int(time.time() * 1000)
     }
     
-    # API BingX tidak mengizinkan TP/SL 0, jadi kita hanya menambahkannya jika > 0
+    # Menggunakan nama parameter 'takeProfit' dan 'stopLoss' sesuai dokumentasi
     if tp_price and tp_price > 0:
-        params['takeProfitPrice'] = f"{tp_price:.5f}"
+        params['takeProfit'] = f"{tp_price:.5f}"
     if sl_price and sl_price > 0:
-        params['stopLossPrice'] = f"{sl_price:.5f}"
+        params['stopLoss'] = f"{sl_price:.5f}"
 
-    # 1. Buat query string dari parameter yang diurutkan untuk ditandatangani.
+    # Proses pembuatan signature tidak berubah dan sudah benar
     query_string_to_sign = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
-    
-    # 2. Buat signature dari string tersebut.
     signature = generate_bingx_signature(secret_key, query_string_to_sign)
-    
-    # 3. Bangun URL final secara manual dengan query string dan signature di akhir.
     final_url = f"{base_url}?{query_string_to_sign}&signature={signature}"
     
-    headers = {
-        'X-BX-APIKEY': api_key,
-        'Content-Type': 'application/json'
-    }
+    headers = { 'X-BX-APIKEY': api_key }
 
     try:
-        # 4. Kirim request POST ke URL yang sudah lengkap, tanpa body (atau body kosong).
         response = requests.post(final_url, headers=headers, timeout=10)
         response.raise_for_status()
         data = response.json()
@@ -125,7 +117,6 @@ def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, 
         if data.get('code') == 0:
             return {'status': 'success', 'order_id': data['data']['order']['orderId'], 'data': data}
         else:
-            # Mengembalikan pesan error lengkap dari BingX untuk debugging
             return {'status': 'error', 'message': json.dumps(data)}
     except Exception as e:
         return {'status': 'error', 'message': str(e)}
@@ -135,7 +126,7 @@ def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, 
 # Inisialisasi Aplikasi Flask & Variabel Global
 app = Flask(__name__)
 app.config['TRADING_SETTINGS'] = {
-    'api_key': '', 'secret_key': '', 'real_trading_enabled': False, 'demo_mode_enabled': True,
+    'api_key': 'Y2DV19toTzEpRgeuq4yW2f6MRzzP36YC2U9iMKHI91ThKI4C0HHGRQrPm315kpmzpNITgMhr6qLYLw0gEO0aAQ', 'secret_key': '1lyvm8QhRdXIkimxLsoSP12U2RNGgfZNfSjRxGy2R8vcA7TzV74uILdMf2aC7b94lDaIEDe5rZCBWSuRoEbQ', 'real_trading_enabled': False, 'demo_mode_enabled': True,
     'order_amount_usdt': 2, 'leverage': 10, 'tp_percent': 0.15, 'sl_percent': 0.15,
     'api_connection_status': 'Belum terhubung'
 }
@@ -316,7 +307,7 @@ HTML_TEMPLATE = """
                 const response = await fetch(`/data`);
                 const data = await response.json();
                 document.getElementById('bybit-price').textContent = data.bybit_close ? `$${data.bybit_close.toFixed(6)}` : '-';
-                const hftChance = data.hft_chance || 0;
+                const hft_chance = data.hft_chance || 0;
                 document.getElementById('hft-chance').textContent = `${hftChance.toFixed(1)}%`;
                 const progressBar = document.getElementById('hft-progress-bar');
                 progressBar.style.width = `${hftChance}%`;
@@ -337,7 +328,6 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# Functions from here are unchanged
 def add_log_to_history(message):
     history = app.config['TRADE_HISTORY_LOG']
     history.insert(0, message)
