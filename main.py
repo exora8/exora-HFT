@@ -79,10 +79,10 @@ def verify_bingx_api(api_key, secret_key):
     except Exception as e:
         return f"Gagal terhubung: Terjadi exception - {e}"
 
-# --- PERBAIKAN NAMA PARAMETER DI SINI ---
+# --- PERBAIKAN FINAL UNTUK "INVALID PARAMETERS" DI SINI ---
 def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, tp_price=None, sl_price=None):
     """
-    Membuat order di BingX dengan nama parameter TP/SL yang sudah diperbaiki.
+    Membuat order di BingX dengan format parameter TP/SL yang benar (JSON String).
     """
     endpoint = "/openApi/swap/v2/trade/order"
     base_url = f"{BINGX_API_URL}{endpoint}"
@@ -92,22 +92,39 @@ def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, 
         'side': 'BUY' if side.lower() == 'buy' else 'SELL',
         'positionSide': 'BOTH',
         'type': order_type.upper(),
-        'quantity': f"{quantity:.5f}",
+        'quantity': f"{quantity:.5f}", # Menggunakan format string untuk presisi
         'timestamp': int(time.time() * 1000)
     }
     
-    # Menggunakan nama parameter 'takeProfit' dan 'stopLoss' sesuai dokumentasi
+    # Membuat objek JSON untuk Take Profit jika ada
     if tp_price and tp_price > 0:
-        params['takeProfit'] = f"{tp_price:.5f}"
-    if sl_price and sl_price > 0:
-        params['stopLoss'] = f"{sl_price:.5f}"
+        tp_object = {
+            "type": "MARKET",
+            "stopPrice": f"{tp_price:.5f}",
+            "workingType": "MARK_PRICE"
+        }
+        params['takeProfit'] = json.dumps(tp_object)
 
-    # Proses pembuatan signature tidak berubah dan sudah benar
+    # Membuat objek JSON untuk Stop Loss jika ada
+    if sl_price and sl_price > 0:
+        sl_object = {
+            "type": "MARKET",
+            "stopPrice": f"{sl_price:.5f}",
+            "workingType": "MARK_PRICE"
+        }
+        params['stopLoss'] = json.dumps(sl_object)
+
     query_string_to_sign = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
     signature = generate_bingx_signature(secret_key, query_string_to_sign)
-    final_url = f"{base_url}?{query_string_to_sign}&signature={signature}"
     
-    headers = { 'X-BX-APIKEY': api_key }
+    # urllib.parse.urlencode akan menangani karakter khusus seperti '{', '}' dengan benar
+    final_query_string = urllib.parse.urlencode(params) + f"&signature={signature}"
+    final_url = f"{base_url}?{final_query_string}"
+    
+    headers = {
+        'X-BX-APIKEY': api_key,
+        'Content-Type': 'application/x-www-form-urlencoded' # Header yang lebih sesuai
+    }
 
     try:
         response = requests.post(final_url, headers=headers, timeout=10)
@@ -307,7 +324,7 @@ HTML_TEMPLATE = """
                 const response = await fetch(`/data`);
                 const data = await response.json();
                 document.getElementById('bybit-price').textContent = data.bybit_close ? `$${data.bybit_close.toFixed(6)}` : '-';
-                const hft_chance = data.hft_chance || 0;
+                const hftChance = data.hft_chance || 0;
                 document.getElementById('hft-chance').textContent = `${hftChance.toFixed(1)}%`;
                 const progressBar = document.getElementById('hft-progress-bar');
                 progressBar.style.width = `${hftChance}%`;
