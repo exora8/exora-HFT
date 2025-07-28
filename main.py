@@ -1,47 +1,166 @@
 import time
-import ccxt
+import requests
+import hmac
+import hashlib
+import urllib.parse
 from flask import Flask, jsonify, render_template_string, request
 import random
 import os
 import json
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 
 # --- KONFIGURASI AWAL ---
 DEFAULT_SYMBOL = 'BRETT/USDT'
 FETCH_INTERVAL = 0.5
 TRIGGER_PERCENTAGE = 0.0015
 TRADE_LOG_FILE = 'trades.json'
-MAX_LOG_HISTORY = 20 # Jumlah log yang ditampilkan di UI
+MAX_LOG_HISTORY = 20
+
+# --- KONSTANTA API ---
+BYBIT_API_URL = "https://api.bybit.com"
+BINGX_API_URL = "https://open-api.bingx.com"
+
+
+# --- FUNGSI HELPER UNTUK API MANUAL ---
+
+def generate_bingx_signature(secret_key, params_str):
+    """Membuat signature HMAC-SHA256 untuk API BingX."""
+    return hmac.new(secret_key.encode('utf-8'), params_str.encode('utf-8'), hashlib.sha256).hexdigest()
+
+def get_bybit_symbols():
+    """Mengambil daftar simbol perpetual USDT dari Bybit."""
+    try:
+        url = f"{BYBIT_API_URL}/v5/market/tickers?category=linear"
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        return {item['symbol'].replace("USDT", "/USDT") for item in data['result']['list'] if item['symbol'].endswith("USDT")}
+    except Exception as e:
+        print(f"Gagal mengambil simbol Bybit: {e}")
+        return set()
+
+def get_bingx_symbols():
+    """Mengambil daftar simbol perpetual dari BingX."""
+    try:
+        url = f"{BINGX_API_URL}/openApi/swap/v2/quote/contracts"
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        return {item['symbol'].replace("-", "/") for item in data['data'] if item['symbol'].endswith("-USDT")}
+    except Exception as e:
+        print(f"Gagal mengambil simbol BingX: {e}")
+        return set()
+
+def get_bybit_latest_ohlc(symbol):
+    """Mengambil data OHLC 1 menit terakhir dari Bybit."""
+    bybit_symbol = symbol.replace('/', '')
+    try:
+        url = f"{BYBIT_API_URL}/v5/market/kline?category=linear&symbol={bybit_symbol}&interval=1&limit=1"
+        response = requests.get(url, timeout=3)
+        response.raise_for_status()
+        data = response.json()
+        if data.get('retCode') == 0 and data['result']['list']:
+            kline = data['result']['list'][0]
+            # [timestamp, open, high, low, close, volume, turnover]
+            return float(kline[1]), float(kline[4])
+        return None, None
+    except Exception as e:
+        # Menghindari log spam saat market tidak ada
+        if "symbol not found" not in str(e):
+             print(f"Error fetching Bybit OHLC for {symbol}: {e}")
+        return None, None
+
+def verify_bingx_api(api_key, secret_key):
+    """Memverifikasi kunci API BingX dengan mengambil data saldo."""
+    endpoint = "/openApi/swap/v2/user/balance"
+    params = {'timestamp': int(time.time() * 1000)}
+    params_str = urllib.parse.urlencode(params)
+    signature = generate_bingx_signature(secret_key, params_str)
+    
+    headers = {'X-BX-APIKEY': api_key}
+    url = f"{BINGX_API_URL}{endpoint}?{params_str}&signature={signature}"
+
+    try:
+        response = requests.get(url, headers=headers, timeout=5)
+        if response.status_code == 200 and response.json().get('code') == 0:
+            return "Berhasil terhubung ke BingX API."
+        else:
+            return f"Gagal terhubung: {response.status_code} - {response.text}"
+    except Exception as e:
+        return f"Gagal terhubung: Terjadi exception - {e}"
+
+def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, tp_price=None, sl_price=None):
+    """Membuat order di BingX."""
+    endpoint = "/openApi/swap/v2/trade/order"
+    # BingX membutuhkan format symbol seperti "BTC-USDT"
+    bingx_symbol = symbol.replace("/", "-")
+    
+    # BingX membutuhkan 'BUY' atau 'SELL'
+    trade_side = 'BUY' if side.lower() == 'buy' else 'SELL'
+    
+    params = {
+        'symbol': bingx_symbol,
+        'side': trade_side,
+        'positionSide': 'BOTH', # atau 'LONG' / 'SHORT'
+        'type': order_type.upper(),
+        'quantity': quantity,
+        'timestamp': int(time.time() * 1000)
+    }
+    
+    # Tambahkan TP/SL jika ada
+    # HARAP DIPERHATIKAN: BingX API memerlukan format harga dengan presisi yang tepat.
+    # Untuk simplisitas, kita format ke 5 desimal. Dalam produksi, gunakan presisi dari /contracts
+    if tp_price:
+        params['takeProfit'] = f"{tp_price:.5f}"
+    if sl_price:
+        params['stopLoss'] = f"{sl_price:.5f}"
+
+    # Buat signature dari dictionary yang diurutkan
+    query_string = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
+    signature = generate_bingx_signature(secret_key, query_string)
+    params['signature'] = signature
+
+    headers = {'X-BX-APIKEY': api_key}
+    url = f"{BINGX_API_URL}{endpoint}"
+
+    try:
+        response = requests.post(url, headers=headers, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        if data.get('code') == 0:
+            return {'status': 'success', 'order_id': data['data']['order']['orderId'], 'data': data}
+        else:
+            return {'status': 'error', 'message': data.get('msg', 'Unknown BingX Error')}
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
 
 # --- Inisialisasi Aplikasi Flask & Variabel Global ---
 app = Flask(__name__)
 app.config['TRADING_SETTINGS'] = {
     'api_key': '', 'secret_key': '', 'real_trading_enabled': False, 'demo_mode_enabled': True,
-    'order_amount_usdt': 10.0, 'leverage': 10, 'tp_percent': 1.5, 'sl_percent': 0.8,
-    'api_connection_status': 'Belum terhubung', 'current_symbol_leveraged': None
+    'order_amount_usdt': 2, 'leverage': 10, 'tp_percent': 0.15, 'sl_percent': 0.15,
+    'api_connection_status': 'Belum terhubung'
 }
-app.config['BINGX_EXCHANGE'] = None
-app.config['ACTIVE_TRADES'] = {} # PERUBAHAN: Menyimpan trade yang sedang berjalan
-app.config['TRADE_HISTORY_LOG'] = [] # PERUBAHAN: Menyimpan riwayat log untuk UI
-trade_file_lock = threading.Lock() # Lock untuk file JSON
+app.config['ACTIVE_TRADES'] = {}
+app.config['TRADE_HISTORY_LOG'] = []
+trade_file_lock = threading.Lock()
 
-# --- Inisialisasi Exchange Publik ---
+# --- Inisialisasi Daftar Simbol ---
 try:
-    bybit = ccxt.bybit()
-    bybit.load_markets()
-    bingx_public = ccxt.bingx()
-    bingx_public.load_markets()
-    bybit_symbols = {s for s in bybit.symbols if s.endswith('/USDT')}
-    bingx_symbols = {s for s in bingx_public.symbols if s.endswith('/USDT')}
+    print("Memuat daftar market dari Bybit & BingX...")
+    bybit_symbols = get_bybit_symbols()
+    bingx_symbols = get_bingx_symbols()
     AVAILABLE_SYMBOLS = sorted(list(bybit_symbols.intersection(bingx_symbols)))
-    print("Berhasil memuat daftar market dari Bybit & BingX.")
+    if not AVAILABLE_SYMBOLS:
+        raise Exception("Tidak ada simbol yang sama ditemukan antara Bybit dan BingX.")
+    print(f"Berhasil memuat {len(AVAILABLE_SYMBOLS)} market yang sama.")
 except Exception as e:
     print(f"Gagal memuat market: {e}")
-    AVAILABLE_SYMBOLS = []
+    AVAILABLE_SYMBOLS = [DEFAULT_SYMBOL] # Fallback
 
-# --- TEMPLATE HTML dengan Log Box yang Ditingkatkan ---
-# --- PERUBAHAN DIMULAI: CSS dan JS untuk Log History ---
+
+# --- TEMPLATE HTML (Tidak ada perubahan, tetap sama) ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -122,6 +241,7 @@ HTML_TEMPLATE = """
         </div>
     </div>
     <script>
+        // --- JAVASCRIPT TIDAK BERUBAH ---
         const symbolSelector = document.getElementById('symbol-selector');
         const apiKeyInput = document.getElementById('api-key'), apiSecretInput = document.getElementById('api-secret');
         const leverageInput = document.getElementById('leverage-input'), amountInput = document.getElementById('amount-input');
@@ -225,18 +345,15 @@ HTML_TEMPLATE = """
 </body>
 </html>
 """
-# --- PERUBAHAN SELESAI ---
 
 # --- FUNGSI-FUNGSI BACKEND ---
 
 def add_log_to_history(message):
-    """Menambahkan log baru ke history dan memastikan tidak lebih dari MAX_LOG_HISTORY."""
     history = app.config['TRADE_HISTORY_LOG']
-    history.insert(0, message) # Tambahkan ke paling atas
+    history.insert(0, message)
     app.config['TRADE_HISTORY_LOG'] = history[:MAX_LOG_HISTORY]
 
 def read_json_file(filepath):
-    """Membaca file JSON dengan aman."""
     with trade_file_lock:
         if not os.path.exists(filepath): return []
         try:
@@ -244,17 +361,14 @@ def read_json_file(filepath):
         except (FileNotFoundError, json.JSONDecodeError): return []
 
 def write_json_file(filepath, data):
-    """Menulis file JSON dengan aman."""
     with trade_file_lock:
         with open(filepath, 'w') as f: json.dump(data, f, indent=4)
 
 def load_initial_state():
-    """Membaca trades.json saat startup untuk melanjutkan pemantauan trade aktif."""
     all_trades = read_json_file(TRADE_LOG_FILE)
     active_trades = {}
     log_history = []
     for trade in all_trades:
-        # Buat log history awal dari trade yang ada
         status = trade.get('status', 'UNKNOWN')
         trade_id = trade.get('id', 'N/A')
         if status == "ACTIVE":
@@ -264,34 +378,29 @@ def load_initial_state():
             log_history.append(f"[TP HIT] {trade['symbol']} closed at {trade.get('closing_price')}")
         elif status == "CLOSED_SL":
             log_history.append(f"[SL HIT] {trade['symbol']} closed at {trade.get('closing_price')}")
-
     app.config['ACTIVE_TRADES'] = active_trades
     app.config['TRADE_HISTORY_LOG'] = log_history[:MAX_LOG_HISTORY]
     print(f"Startup: Ditemukan {len(active_trades)} trade aktif untuk dipantau.")
 
 def update_trade_in_json(trade_id, new_status, closing_price):
-    """Mencari trade di JSON dan memperbarui statusnya."""
     all_trades = read_json_file(TRADE_LOG_FILE)
     for trade in all_trades:
         if trade.get('id') == trade_id:
             trade['status'] = new_status
             trade['closing_price'] = closing_price
-            trade['closed_at'] = datetime.now().isoformat()
+            trade['closed_at'] = datetime.now(timezone.utc).isoformat()
             break
     write_json_file(TRADE_LOG_FILE, all_trades)
     
 def check_active_trades(symbol, current_price):
-    """Memeriksa semua trade aktif terhadap harga saat ini."""
     if not current_price: return
     active_trades = app.config['ACTIVE_TRADES']
     closed_trades = []
 
-    for trade_id, trade in active_trades.items():
+    for trade_id, trade in list(active_trades.items()):
         if trade['symbol'] != symbol: continue
 
-        tp_hit = False
-        sl_hit = False
-
+        tp_hit, sl_hit = False, False
         if trade['side'] == 'buy':
             if current_price >= trade['tp_price']: tp_hit = True
             elif current_price <= trade['sl_price']: sl_hit = True
@@ -307,16 +416,13 @@ def check_active_trades(symbol, current_price):
             update_trade_in_json(trade_id, status, current_price)
             closed_trades.append(trade_id)
 
-    # Hapus trade yang sudah ditutup dari daftar aktif
     for trade_id in closed_trades:
         if trade_id in app.config['ACTIVE_TRADES']:
             del app.config['ACTIVE_TRADES'][trade_id]
 
 def process_trade_trigger(symbol, side, price):
-    """Memproses trigger trading, kini dengan status ACTIVE."""
     settings = app.config['TRADING_SETTINGS']
     mode = "DEMO" if settings['demo_mode_enabled'] else "REAL"
-    mode_log_str = f"[{mode}]"
     
     tp_price = price * (1 + settings['tp_percent'] / 100) if side == 'buy' else price * (1 - settings['tp_percent'] / 100)
     sl_price = price * (1 - settings['sl_percent'] / 100) if side == 'buy' else price * (1 + settings['sl_percent'] / 100)
@@ -324,70 +430,99 @@ def process_trade_trigger(symbol, side, price):
     trade_id = f"{mode}-{int(time.time()*1000)}"
 
     trade_record = {
-        "id": trade_id, "timestamp": datetime.now().isoformat(), "symbol": symbol, "side": side,
+        "id": trade_id, "timestamp": datetime.now(timezone.utc).isoformat(), "symbol": symbol, "side": side,
         "amount_usdt": settings['order_amount_usdt'], "entry_price": price, "leverage": settings['leverage'],
         "tp_price": tp_price, "sl_price": sl_price, "status": "ACTIVE", "mode": mode,
         "closing_price": None, "closed_at": None
     }
     
     if mode == "REAL":
-        exchange = app.config.get('BINGX_EXCHANGE')
-        if not exchange:
+        if "Berhasil" not in settings['api_connection_status']:
             add_log_to_history("Gagal: REAL Mode, API tidak terhubung."); return
-        try:
-            params = {'takeProfitPrice': exchange.price_to_precision(symbol, tp_price), 'stopLossPrice': exchange.price_to_precision(symbol, sl_price)}
-            order = exchange.create_order(symbol, 'market', side, settings['order_amount_usdt'] / price, params=params)
-            trade_record['id'] = order['id'] # Gunakan ID order asli dari exchange
-        except Exception as e:
-            add_log_to_history(f"ERROR: Gagal eksekusi REAL order: {e}"); return
+        
+        # Hitung kuantitas dalam mata uang dasar (misal: BRETT)
+        quantity = settings['order_amount_usdt'] / price
+        
+        order_result = create_bingx_order(
+            settings['api_key'], settings['secret_key'], symbol, side, 'market',
+            quantity, tp_price=tp_price, sl_price=sl_price
+        )
+        
+        if order_result['status'] == 'success':
+            trade_record['id'] = order_result['order_id'] # Gunakan ID order asli dari exchange
+        else:
+            log_msg = f"ERROR: Gagal eksekusi REAL order: {order_result.get('message', 'Unknown error')}"
+            add_log_to_history(log_msg)
+            print(log_msg)
+            return
     
-    # Simpan ke state dan file
     all_trades = read_json_file(TRADE_LOG_FILE)
     all_trades.append(trade_record)
     write_json_file(TRADE_LOG_FILE, all_trades)
     app.config['ACTIVE_TRADES'][trade_record['id']] = trade_record
     
-    log_msg = f"[NEW] {mode_log_str} {side.upper()} {symbol} @ ${price:.5f}"
+    log_msg = f"[NEW] [{mode}] {side.upper()} {symbol} @ ${price:.5f}"
     print(log_msg)
     add_log_to_history(log_msg)
     
 # --- ENDPOINTS FLASK ---
 
 @app.route('/')
-def index(): return render_template_string(HTML_TEMPLATE, interval=FETCH_INTERVAL, symbols=AVAILABLE_SYMBOLS, default_symbol=DEFAULT_SYMBOL)
+def index():
+    return render_template_string(HTML_TEMPLATE, interval=FETCH_INTERVAL, symbols=AVAILABLE_SYMBOLS, default_symbol=DEFAULT_SYMBOL)
 
 @app.route('/get_settings')
-def get_settings(): return jsonify(app.config['TRADING_SETTINGS'])
+def get_settings():
+    return jsonify(app.config['TRADING_SETTINGS'])
 
 @app.route('/update_settings', methods=['POST'])
 def update_settings():
-    # Fungsi ini tidak perlu diubah signifikan
     data = request.get_json()
     settings = app.config['TRADING_SETTINGS']
-    settings.update({'api_key': data.get('api_key'), 'secret_key': data.get('secret_key'), 'leverage': int(data.get('leverage')), 'order_amount_usdt': float(data.get('amount')), 'tp_percent': float(data.get('tp')), 'sl_percent': float(data.get('sl'))})
-    status_msg = reconnect_bingx(settings['api_key'], settings['secret_key'])
+    
+    # Simpan kunci API ke dalam settings
+    settings.update({
+        'api_key': data.get('api_key', '').strip(), 
+        'secret_key': data.get('secret_key', '').strip(), 
+        'leverage': int(data.get('leverage')), 
+        'order_amount_usdt': float(data.get('amount')), 
+        'tp_percent': float(data.get('tp')), 
+        'sl_percent': float(data.get('sl'))
+    })
+    
+    # Verifikasi kunci API
+    status_msg = verify_bingx_api(settings['api_key'], settings['secret_key'])
     settings['api_connection_status'] = status_msg
-    if "Gagal" in status_msg: settings['real_trading_enabled'] = False
+    if "Gagal" in status_msg:
+        settings['real_trading_enabled'] = False
+    
     add_log_to_history(status_msg)
     return jsonify({'status': 'success', 'api_status': status_msg})
 
 @app.route('/toggle_mode', methods=['POST'])
 def toggle_mode():
-    # Fungsi ini tidak perlu diubah signifikan
     settings = app.config['TRADING_SETTINGS']
     data = request.get_json()
     mode, is_enabled = data.get('mode'), data.get('enabled')
+    
     if mode == 'real' and is_enabled:
         if "Berhasil" not in settings['api_connection_status']:
-            add_log_to_history("Gagal: Mode REAL butuh koneksi API."); settings['real_trading_enabled'] = False
+            add_log_to_history("Gagal: Mode REAL butuh koneksi API.");
+            settings['real_trading_enabled'] = False
         else:
             settings.update({'real_trading_enabled': True, 'demo_mode_enabled': False})
             add_log_to_history("Mode REAL diaktifkan.")
     elif mode == 'real' and not is_enabled:
         settings['real_trading_enabled'] = False
+        add_log_to_history("Mode REAL dinonaktifkan.")
     elif mode == 'demo':
-        settings.update({'demo_mode_enabled': is_enabled, 'real_trading_enabled': False if is_enabled else settings['real_trading_enabled']})
-        if is_enabled: add_log_to_history("Mode DEMO diaktifkan.")
+        settings.update({'demo_mode_enabled': is_enabled})
+        if is_enabled:
+            settings['real_trading_enabled'] = False
+            add_log_to_history("Mode DEMO diaktifkan.")
+        else:
+            add_log_to_history("Mode DEMO dinonaktifkan.")
+            
     return jsonify(settings)
 
 @app.route('/data')
@@ -395,32 +530,44 @@ def data():
     symbol = request.args.get('symbol', DEFAULT_SYMBOL)
     settings = app.config['TRADING_SETTINGS']
     
-    # Fungsi lain tidak diubah...
-    bybit_open, bybit_close = get_latest_ohlc(bybit, symbol)
-    check_active_trades(symbol, bybit_close) # PERUBAHAN: Cek TP/SL setiap ada data baru
+    _, bybit_close = get_bybit_latest_ohlc(symbol)
+    check_active_trades(symbol, bybit_close)
     
     hft_chance, alert_direction = 0, 'none'
     state = app.config.setdefault('STATE', {}).setdefault(symbol, {"last_bybit_close": None})
+    
     if bybit_close and state.get('last_bybit_close'):
         last_close = state['last_bybit_close']
         change_pct = (bybit_close - last_close) / last_close
         hft_chance = min(abs(change_pct / TRIGGER_PERCENTAGE) * 100, 100)
-        if change_pct > TRIGGER_PERCENTAGE: alert_direction = "up"
-        elif change_pct < -TRIGGER_PERCENTAGE: alert_direction = "down"
-        if alert_direction != 'none' and (settings['real_trading_enabled'] or settings['demo_mode_enabled']):
-            threading.Thread(target=process_trade_trigger, args=(symbol, 'buy' if alert_direction == 'up' else 'sell', bybit_close)).start()
-            state['last_bybit_close'] = None
-    if bybit_close: state['last_bybit_close'] = bybit_close
         
-    return jsonify({'symbol': symbol, 'bybit_close': bybit_close, 'hft_chance': hft_chance, 'trade_history': app.config['TRADE_HISTORY_LOG']})
+        if change_pct > TRIGGER_PERCENTAGE:
+            alert_direction = "up"
+        elif change_pct < -TRIGGER_PERCENTAGE:
+            alert_direction = "down"
+            
+        if alert_direction != 'none' and (settings['real_trading_enabled'] or settings['demo_mode_enabled']):
+            # Cek apakah ada trade aktif untuk simbol ini
+            is_trade_active_for_symbol = any(t['symbol'] == symbol for t in app.config['ACTIVE_TRADES'].values())
+            if not is_trade_active_for_symbol:
+                 threading.Thread(target=process_trade_trigger, args=(symbol, 'buy' if alert_direction == 'up' else 'sell', bybit_close)).start()
+                 state['last_bybit_close'] = None # Reset setelah trigger untuk menghindari trigger beruntun
+            else:
+                 #print(f"Pemicu diabaikan, sudah ada trade aktif untuk {symbol}")
+                 pass
 
-def get_latest_ohlc(exchange, symbol):
-    try:
-        ohlcv = exchange.fetch_ohlcv(symbol, '1m', limit=1); return [ohlcv[0][1], ohlcv[0][4]] if ohlcv else [None, None]
-    except Exception: return [None, None]
-def reconnect_bingx(a,b): return "Fungsi dummy" # Placeholder untuk fungsi yang tidak diubah
+    if bybit_close:
+        state['last_bybit_close'] = bybit_close
+        
+    return jsonify({
+        'symbol': symbol, 
+        'bybit_close': bybit_close, 
+        'hft_chance': hft_chance, 
+        'trade_history': app.config['TRADE_HISTORY_LOG']
+    })
 
 if __name__ == '__main__':
-    load_initial_state() # PERUBAHAN: Muat state dari file JSON saat mulai
+    load_initial_state()
     print(f"Server berjalan di http://127.0.0.1:5000")
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    # Gunakan 'threaded=True' jika menggunakan development server Flask untuk handle request bersamaan
+    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
