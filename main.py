@@ -135,7 +135,7 @@ def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, 
 # Inisialisasi Aplikasi Flask & Variabel Global
 app = Flask(__name__)
 app.config['TRADING_SETTINGS'] = {
-    'api_key': 'Y2DV19toTzEpRgeuq4yW2f6MRzzP36YC2U9iMKHI91ThKI4C0HHGRQrPm315kpmzpNITgMhr6qLYLw0gEO0aAQ', 'secret_key': '1lyvm8QhRdXIkimxLsoSP12U2RNGgfZNfSjRxGy2R8vcA7TzV74uILdMf2aC7b94lDaIEDe5rZCBWSuRoEbQ', 'real_trading_enabled': False, 'demo_mode_enabled': True,
+    'api_key': '', 'secret_key': '', 'real_trading_enabled': False, 'demo_mode_enabled': True,
     'order_amount_usdt': 2, 'leverage': 10, 'tp_percent': 0.15, 'sl_percent': 0.15,
     'api_connection_status': 'Belum terhubung'
 }
