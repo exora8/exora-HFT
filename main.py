@@ -79,10 +79,10 @@ def verify_bingx_api(api_key, secret_key):
     except Exception as e:
         return f"Gagal terhubung: Terjadi exception - {e}"
 
-# --- FUNGSI DIPERBAIKI (FIX HEDGE MODE) ---
+# --- FUNGSI DIPERBAIKI (FIX TIPE DATA FLOAT) ---
 def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, tp_price=None, sl_price=None):
     """
-    Memperbaiki positionSide untuk Hedge Mode.
+    Memperbaiki tipe data stopPrice menjadi float/number, bukan string.
     """
     endpoint = "/openApi/swap/v2/trade/order"
     url = f"{BINGX_API_URL}{endpoint}"
@@ -90,20 +90,20 @@ def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, 
     params = {
         'symbol': symbol.replace("/", "-"),
         'side': 'BUY' if side.lower() == 'buy' else 'SELL',
-        # --- PERUBAHAN DI SINI ---
-        # Mengganti 'BOTH' menjadi 'LONG'/'SHORT' sesuai trade direction
         'positionSide': 'LONG' if side.lower() == 'buy' else 'SHORT',
         'type': order_type.upper(),
         'quantity': str(quantity),
         'timestamp': int(time.time() * 1000),
     }
     
+    # --- PERUBAHAN DI SINI ---
+    # Mengirim harga sebagai ANGKA (float), bukan TEKS (string).
     if tp_price and tp_price > 0:
-        tp_object = {"type": "MARKET", "stopPrice": f"{tp_price:.5f}", "workingType": "MARK_PRICE"}
+        tp_object = {"type": "MARKET", "stopPrice": round(tp_price, 5), "workingType": "MARK_PRICE"}
         params['takeProfit'] = json.dumps(tp_object)
 
     if sl_price and sl_price > 0:
-        sl_object = {"type": "MARKET", "stopPrice": f"{sl_price:.5f}", "workingType": "MARK_PRICE"}
+        sl_object = {"type": "MARKET", "stopPrice": round(sl_price, 5), "workingType": "MARK_PRICE"}
         params['stopLoss'] = json.dumps(sl_object)
 
     sorted_params = sorted(params.items())
