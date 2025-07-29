@@ -71,6 +71,7 @@ def verify_bingx_api(api_key, secret_key):
     headers = {'X-BX-APIKEY': api_key}
     url = f"{BINGX_API_URL}{endpoint}"
     try:
+        # GET request menggunakan 'params'
         response = requests.get(url, headers=headers, params=params, timeout=5)
         if response.status_code == 200 and response.json().get('code') == 0:
             return "Berhasil terhubung ke BingX API."
@@ -79,11 +80,10 @@ def verify_bingx_api(api_key, secret_key):
     except Exception as e:
         return f"Gagal terhubung: Terjadi exception - {e}"
 
-# --- FUNGSI DIPERBAIKI ---
-# Mengganti fungsi create_bingx_order yang lama dengan versi yang sudah benar.
+# --- FUNGSI DIPERBAIKI (VERSI FINAL) ---
 def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, tp_price=None, sl_price=None):
     """
-    Memperbaiki pembuatan order di BingX dengan proses signature yang benar untuk request POST.
+    Memperbaiki pembuatan order di BingX dengan proses signature dan metode pengiriman request yang benar.
     """
     endpoint = "/openApi/swap/v2/trade/order"
     url = f"{BINGX_API_URL}{endpoint}"
@@ -94,12 +94,13 @@ def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, 
         'side': 'BUY' if side.lower() == 'buy' else 'SELL',
         'positionSide': 'BOTH',
         'type': order_type.upper(),
-        'quantity': str(quantity), # Gunakan string untuk menjaga presisi
-        'timestamp': int(time.time() * 1000)
+        'quantity': str(quantity),
+        'timestamp': int(time.time() * 1000),
     }
     
-    # 2. Tambahkan parameter TP/SL jika ada, sebagai string JSON
+    # 2. Tambahkan parameter TP/SL jika ada
     if tp_price and tp_price > 0:
+        # PENTING: BingX mengharapkan TP/SL sebagai string JSON
         tp_object = {"type": "MARKET", "stopPrice": f"{tp_price:.5f}", "workingType": "MARK_PRICE"}
         params['takeProfit'] = json.dumps(tp_object)
 
@@ -107,40 +108,52 @@ def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, 
         sl_object = {"type": "MARKET", "stopPrice": f"{sl_price:.5f}", "workingType": "MARK_PRICE"}
         params['stopLoss'] = json.dumps(sl_object)
 
-    # 3. Bangun query string UNTUK TANDA TANGAN dari parameter yang sudah diurutkan
-    # Inilah string yang akan dibuat ulang dan diverifikasi oleh server BingX
-    query_string_for_signature = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
+    # 3. Urutkan parameter berdasarkan key secara alfabet
+    sorted_params = sorted(params.items())
     
-    # 4. Buat signature
-    signature = generate_bingx_signature(secret_key, query_string_for_signature)
+    # 4. Gabungkan menjadi query string. Inilah string yang akan ditandatangani.
+    # Format ini ("key=value&key2=value2") adalah standar yang paling umum.
+    query_string_to_sign = '&'.join([f"{k}={v}" for k, v in sorted_params])
     
-    # 5. Tambahkan signature ke dalam dictionary parameter yang akan dikirim
-    params['signature'] = signature
+    # 5. Buat signature
+    signature = generate_bingx_signature(secret_key, query_string_to_sign)
     
-    # 6. Siapkan header
+    # 6. Tambahkan signature ke query string untuk dikirim
+    final_payload_string = f"{query_string_to_sign}&signature={signature}"
+    
+    # 7. Siapkan header. PENTING: Content-Type harus benar.
     headers = {
         'X-BX-APIKEY': api_key,
+        'Content-Type': 'application/x-www-form-urlencoded'
     }
 
     try:
-        # 7. Kirim request POST. Pustaka 'requests' akan otomatis melakukan URL-encode
-        # pada dictionary 'params' dan menaruhnya di body request.
-        response = requests.post(url, headers=headers, params=params, timeout=10)
+        # 8. Kirim request POST dengan payload sebagai 'data', bukan 'params'.
+        # 'data' menempatkan payload di body request, 'params' menaruhnya di URL.
+        # Inilah kemungkinan besar penyebab error sebelumnya.
+        response = requests.post(url, headers=headers, data=final_payload_string, timeout=10)
+        
         response.raise_for_status()
         data = response.json()
         
         if data.get('code') == 0:
             return {'status': 'success', 'order_id': data['data']['order']['orderId'], 'data': data}
         else:
-            # Print detail error untuk debugging yang lebih mudah
-            print(f"ERROR: Gagal eksekusi REAL order: {json.dumps(data)}")
-            print(f"DEBUG: String yang ditandatangani: {query_string_for_signature}")
+            # Print debug yang sangat penting jika masih gagal
+            print("--- DEBUGGING GAGAL SIGNATURE ---")
+            print(f"URL: {url}")
+            print(f"Payload String yang Dikirim: {final_payload_string}")
+            print(f"String yang Ditandatangani: {query_string_to_sign}")
+            print(f"API Response: {json.dumps(data)}")
+            print("---------------------------------")
             return {'status': 'error', 'message': json.dumps(data)}
+            
     except requests.exceptions.RequestException as e:
         print(f"ERROR: Exception saat request API: {e}")
         if e.response:
             print(f"ERROR: Response Body: {e.response.text}")
         return {'status': 'error', 'message': str(e)}
+
 
 # --- Sisa skrip dari sini TIDAK BERUBAH ---
 
@@ -285,7 +298,7 @@ HTML_TEMPLATE = """
             saveBtn.disabled = true; saveBtn.textContent = "Menyimpan...";
             const settingsData = {
                 api_key: apiKeyInput.value, secret_key: apiSecretInput.value, leverage: parseInt(leverageInput.value),
-                amount: parseFloat(amountInput.value), tp: parseFloat(tpInput.value), sl: parseFloat(slInput.value), symbol: symbolSelector.value
+                amount: parseFloat(amountInput.value), tp: parseFloat(tpInput.value), sl: parseFloat(slInput.value)
             };
             try {
                 const response = await fetch('/update_settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(settingsData) });
@@ -336,15 +349,17 @@ HTML_TEMPLATE = """
                 else if (hftChance > 60) progressBar.style.backgroundColor = 'var(--yellow-color)';
                 else progressBar.style.backgroundColor = 'var(--green-color)';
                 if(data.trade_history) updateLogBox(data.trade_history);
-                symbolSelector.value = data.symbol;
+                if (symbolSelector.value !== data.symbol) {
+                    symbolSelector.value = data.symbol;
+                }
             } catch (error) { console.error("Error fetching data:", error); }
         }
         symbolSelector.addEventListener('change', () => { 
-            loadTradingViewWidget(symbolSelector.value); 
-            // Juga kirim simbol baru ke backend
-            fetch('/update_settings', { 
+            const newSymbol = symbolSelector.value;
+            loadTradingViewWidget(newSymbol); 
+            fetch('/update_symbol', { 
                 method: 'POST', headers: {'Content-Type': 'application/json'}, 
-                body: JSON.stringify({ symbol: symbolSelector.value }) 
+                body: JSON.stringify({ symbol: newSymbol }) 
             });
         });
         saveBtn.addEventListener('click', saveSettings);
@@ -381,7 +396,7 @@ def load_initial_state():
         status = trade.get('status', 'UNKNOWN')
         trade_id = trade.get('id', 'N/A')
         if status == "ACTIVE":
-            active_trades[trade_id] = trade
+            active_trades[str(trade_id)] = trade # Pastikan ID adalah string
             log_history.append(f"ACTIVE: {trade['symbol']} {trade['side']} from {trade.get('entry_price')}")
     app.config['ACTIVE_TRADES'] = active_trades
     app.config['TRADE_HISTORY_LOG'] = log_history[:MAX_LOG_HISTORY]
@@ -422,8 +437,8 @@ def check_active_trades(symbol, current_price):
             closed_trades.append(trade_id)
 
     for trade_id in closed_trades:
-        if trade_id in app.config['ACTIVE_TRADES']:
-            del app.config['ACTIVE_TRADES'][trade_id]
+        if str(trade_id) in app.config['ACTIVE_TRADES']:
+            del app.config['ACTIVE_TRADES'][str(trade_id)]
 
 def process_trade_trigger(symbol, side, price):
     settings = app.config['TRADING_SETTINGS']
@@ -445,7 +460,6 @@ def process_trade_trigger(symbol, side, price):
         if "Berhasil" not in settings['api_connection_status']:
             add_log_to_history("Gagal: REAL Mode, API tidak terhubung."); return
         
-        # Quantity dihitung dari Amount (USDT) / Harga
         quantity = settings['order_amount_usdt'] / price
         
         order_result = create_bingx_order(
@@ -457,13 +471,14 @@ def process_trade_trigger(symbol, side, price):
             trade_record['id'] = order_result['order_id']
         else:
             log_msg = f"ERROR: Gagal eksekusi REAL order: {order_result.get('message', 'Unknown error')}"
-            add_log_to_history(log_msg); print(log_msg); return
+            add_log_to_history(log_msg); # `print` sudah ada di dalam create_bingx_order
+            return
 
     all_trades = read_json_file(TRADE_LOG_FILE)
     all_trades.append(trade_record)
-    write_json_file(TRADE_LOG_FILE, all_trades) # Simpan trade ke file
+    write_json_file(TRADE_LOG_FILE, all_trades)
     
-    app.config['ACTIVE_TRADES'][trade_record['id']] = trade_record
+    app.config['ACTIVE_TRADES'][str(trade_record['id'])] = trade_record
     log_msg = f"[NEW] [{mode}] {side.upper()} {symbol} @ ${price:.5f} | TP: {tp_price:.5f} SL: {sl_price:.5f}"
     print(log_msg)
     add_log_to_history(log_msg)
@@ -472,21 +487,18 @@ def background_trading_loop():
     print("Background trading loop telah dimulai...")
     while True:
         try:
-            # Selalu ambil simbol terbaru dari config
             symbol = app.config['LIVE_DATA']['symbol']
-            
             settings = app.config['TRADING_SETTINGS']
             _, bybit_close = get_bybit_latest_ohlc(symbol)
             
             if bybit_close is None:
-                # Jangan lanjutkan jika tidak ada harga
                 time.sleep(FETCH_INTERVAL)
                 continue
 
             app.config['LIVE_DATA']['bybit_close'] = bybit_close
             check_active_trades(symbol, bybit_close)
             
-            state = app.config.setdefault('STATE', {}).setdefault(symbol, {"last_bybit_close": None, "last_trade_time": 0})
+            state = app.config.setdefault('STATE', {}).setdefault(symbol, {"last_bybit_close": None})
             
             hft_chance = 0
             if state.get('last_bybit_close'):
@@ -498,22 +510,15 @@ def background_trading_loop():
                 if change_pct > TRIGGER_PERCENTAGE: alert_direction = "up"
                 elif change_pct < -TRIGGER_PERCENTAGE: alert_direction = "down"
                 
-                # Cek jika ada mode trading yang aktif
                 if alert_direction != 'none' and (settings['real_trading_enabled'] or settings['demo_mode_enabled']):
-                    # Cek apakah sudah ada trade aktif untuk simbol ini
                     is_trade_active_for_symbol = any(t['symbol'] == symbol for t in app.config['ACTIVE_TRADES'].values())
-                    
                     if not is_trade_active_for_symbol:
-                        # Buat thread baru untuk memproses trade agar tidak memblok loop utama
                         threading.Thread(target=process_trade_trigger, args=(symbol, 'buy' if alert_direction == 'up' else 'sell', bybit_close)).start()
-                        # Reset last_bybit_close agar tidak langsung trigger lagi di iterasi berikutnya
-                        state['last_bybit_close'] = None 
+                        state['last_bybit_close'] = None
             
-            # Selalu update harga terakhir jika tidak ada trade yang baru saja dieksekusi
             if state.get('last_bybit_close') is not None:
                 state['last_bybit_close'] = bybit_close
             elif not any(t['symbol'] == symbol for t in app.config['ACTIVE_TRADES'].values()):
-                # Jika tidak ada trade aktif, mulai lacak harga lagi
                 state['last_bybit_close'] = bybit_close
 
             app.config['LIVE_DATA']['hft_chance'] = hft_chance
@@ -537,17 +542,20 @@ def update_settings():
     data = request.get_json()
     settings = app.config['TRADING_SETTINGS']
     
-    # Update hanya data yang dikirim
-    if 'api_key' in data: settings['api_key'] = data.get('api_key', '').strip()
-    if 'secret_key' in data: settings['secret_key'] = data.get('secret_key', '').strip()
+    api_changed = False
+    if 'api_key' in data and settings['api_key'] != data['api_key']:
+        settings['api_key'] = data.get('api_key', '').strip()
+        api_changed = True
+    if 'secret_key' in data and settings['secret_key'] != data['secret_key']:
+        settings['secret_key'] = data.get('secret_key', '').strip()
+        api_changed = True
+
     if 'leverage' in data: settings['leverage'] = int(data.get('leverage'))
     if 'amount' in data: settings['order_amount_usdt'] = float(data.get('amount'))
     if 'tp' in data: settings['tp_percent'] = float(data.get('tp'))
     if 'sl' in data: settings['sl_percent'] = float(data.get('sl'))
-    if 'symbol' in data: app.config['LIVE_DATA']['symbol'] = data.get('symbol')
-
-    # Hanya verifikasi API jika key atau secret diubah
-    if 'api_key' in data or 'secret_key' in data:
+    
+    if api_changed:
         status_msg = verify_bingx_api(settings['api_key'], settings['secret_key'])
         settings['api_connection_status'] = status_msg
         if "Gagal" in status_msg: 
@@ -555,6 +563,16 @@ def update_settings():
         add_log_to_history(f"API Status: {status_msg}")
     
     return jsonify({'status': 'success', 'api_status': settings['api_connection_status']})
+
+@app.route('/update_symbol', methods=['POST'])
+def update_symbol():
+    data = request.get_json()
+    if 'symbol' in data:
+        app.config['LIVE_DATA']['symbol'] = data.get('symbol')
+        # Reset state untuk simbol baru
+        app.config.setdefault('STATE', {}).pop(data.get('symbol'), None)
+        return jsonify({'status': 'success', 'symbol': data.get('symbol')})
+    return jsonify({'status': 'error', 'message': 'Symbol not provided'}), 400
 
 @app.route('/toggle_mode', methods=['POST'])
 def toggle_mode():
@@ -595,5 +613,4 @@ if __name__ == '__main__':
     trade_loop_thread.start()
     print(f"Server berjalan di http://127.0.0.1:5000")
     print("Logika trading berjalan di background. Anda bisa menutup browser.")
-    # Jalankan Flask app
     app.run(host='0.0.0.0', port=5000, debug=False)
