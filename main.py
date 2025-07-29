@@ -71,7 +71,6 @@ def verify_bingx_api(api_key, secret_key):
     headers = {'X-BX-APIKEY': api_key}
     url = f"{BINGX_API_URL}{endpoint}"
     try:
-        # GET request menggunakan 'params'
         response = requests.get(url, headers=headers, params=params, timeout=5)
         if response.status_code == 200 and response.json().get('code') == 0:
             return "Berhasil terhubung ke BingX API."
@@ -80,27 +79,26 @@ def verify_bingx_api(api_key, secret_key):
     except Exception as e:
         return f"Gagal terhubung: Terjadi exception - {e}"
 
-# --- FUNGSI DIPERBAIKI (VERSI FINAL) ---
+# --- FUNGSI DIPERBAIKI (FIX HEDGE MODE) ---
 def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, tp_price=None, sl_price=None):
     """
-    Memperbaiki pembuatan order di BingX dengan proses signature dan metode pengiriman request yang benar.
+    Memperbaiki positionSide untuk Hedge Mode.
     """
     endpoint = "/openApi/swap/v2/trade/order"
     url = f"{BINGX_API_URL}{endpoint}"
     
-    # 1. Siapkan semua parameter dalam sebuah dictionary
     params = {
         'symbol': symbol.replace("/", "-"),
         'side': 'BUY' if side.lower() == 'buy' else 'SELL',
-        'positionSide': 'BOTH',
+        # --- PERUBAHAN DI SINI ---
+        # Mengganti 'BOTH' menjadi 'LONG'/'SHORT' sesuai trade direction
+        'positionSide': 'LONG' if side.lower() == 'buy' else 'SHORT',
         'type': order_type.upper(),
         'quantity': str(quantity),
         'timestamp': int(time.time() * 1000),
     }
     
-    # 2. Tambahkan parameter TP/SL jika ada
     if tp_price and tp_price > 0:
-        # PENTING: BingX mengharapkan TP/SL sebagai string JSON
         tp_object = {"type": "MARKET", "stopPrice": f"{tp_price:.5f}", "workingType": "MARK_PRICE"}
         params['takeProfit'] = json.dumps(tp_object)
 
@@ -108,44 +106,29 @@ def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, 
         sl_object = {"type": "MARKET", "stopPrice": f"{sl_price:.5f}", "workingType": "MARK_PRICE"}
         params['stopLoss'] = json.dumps(sl_object)
 
-    # 3. Urutkan parameter berdasarkan key secara alfabet
     sorted_params = sorted(params.items())
-    
-    # 4. Gabungkan menjadi query string. Inilah string yang akan ditandatangani.
-    # Format ini ("key=value&key2=value2") adalah standar yang paling umum.
     query_string_to_sign = '&'.join([f"{k}={v}" for k, v in sorted_params])
-    
-    # 5. Buat signature
     signature = generate_bingx_signature(secret_key, query_string_to_sign)
-    
-    # 6. Tambahkan signature ke query string untuk dikirim
     final_payload_string = f"{query_string_to_sign}&signature={signature}"
     
-    # 7. Siapkan header. PENTING: Content-Type harus benar.
     headers = {
         'X-BX-APIKEY': api_key,
         'Content-Type': 'application/x-www-form-urlencoded'
     }
 
     try:
-        # 8. Kirim request POST dengan payload sebagai 'data', bukan 'params'.
-        # 'data' menempatkan payload di body request, 'params' menaruhnya di URL.
-        # Inilah kemungkinan besar penyebab error sebelumnya.
         response = requests.post(url, headers=headers, data=final_payload_string, timeout=10)
-        
         response.raise_for_status()
         data = response.json()
         
         if data.get('code') == 0:
             return {'status': 'success', 'order_id': data['data']['order']['orderId'], 'data': data}
         else:
-            # Print debug yang sangat penting jika masih gagal
-            print("--- DEBUGGING GAGAL SIGNATURE ---")
+            print("--- DEBUGGING GAGAL ORDER ---")
             print(f"URL: {url}")
-            print(f"Payload String yang Dikirim: {final_payload_string}")
-            print(f"String yang Ditandatangani: {query_string_to_sign}")
+            print(f"Payload String yang Dikirim (body): {final_payload_string}")
             print(f"API Response: {json.dumps(data)}")
-            print("---------------------------------")
+            print("-----------------------------")
             return {'status': 'error', 'message': json.dumps(data)}
             
     except requests.exceptions.RequestException as e:
@@ -396,7 +379,7 @@ def load_initial_state():
         status = trade.get('status', 'UNKNOWN')
         trade_id = trade.get('id', 'N/A')
         if status == "ACTIVE":
-            active_trades[str(trade_id)] = trade # Pastikan ID adalah string
+            active_trades[str(trade_id)] = trade
             log_history.append(f"ACTIVE: {trade['symbol']} {trade['side']} from {trade.get('entry_price')}")
     app.config['ACTIVE_TRADES'] = active_trades
     app.config['TRADE_HISTORY_LOG'] = log_history[:MAX_LOG_HISTORY]
@@ -471,7 +454,7 @@ def process_trade_trigger(symbol, side, price):
             trade_record['id'] = order_result['order_id']
         else:
             log_msg = f"ERROR: Gagal eksekusi REAL order: {order_result.get('message', 'Unknown error')}"
-            add_log_to_history(log_msg); # `print` sudah ada di dalam create_bingx_order
+            add_log_to_history(log_msg)
             return
 
     all_trades = read_json_file(TRADE_LOG_FILE)
@@ -568,10 +551,12 @@ def update_settings():
 def update_symbol():
     data = request.get_json()
     if 'symbol' in data:
-        app.config['LIVE_DATA']['symbol'] = data.get('symbol')
-        # Reset state untuk simbol baru
-        app.config.setdefault('STATE', {}).pop(data.get('symbol'), None)
-        return jsonify({'status': 'success', 'symbol': data.get('symbol')})
+        new_symbol = data.get('symbol')
+        app.config['LIVE_DATA']['symbol'] = new_symbol
+        # Reset state untuk simbol baru untuk memastikan harga referensi diperbarui
+        app.config.setdefault('STATE', {})[new_symbol] = {"last_bybit_close": None}
+        print(f"Simbol diubah ke {new_symbol}")
+        return jsonify({'status': 'success', 'symbol': new_symbol})
     return jsonify({'status': 'error', 'message': 'Symbol not provided'}), 400
 
 @app.route('/toggle_mode', methods=['POST'])
