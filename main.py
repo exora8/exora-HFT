@@ -79,10 +79,10 @@ def verify_bingx_api(api_key, secret_key):
     except Exception as e:
         return f"Gagal terhubung: Terjadi exception - {e}"
 
-# --- FUNGSI DIPERBAIKI (FIX TIPE DATA FLOAT) ---
+# --- FUNGSI DIPERBAIKI (FIX TIPE TP/SL) ---
 def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, tp_price=None, sl_price=None):
     """
-    Memperbaiki tipe data stopPrice menjadi float/number, bukan string.
+    Memperbaiki nilai 'type' di dalam JSON TP/SL.
     """
     endpoint = "/openApi/swap/v2/trade/order"
     url = f"{BINGX_API_URL}{endpoint}"
@@ -97,13 +97,13 @@ def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, 
     }
     
     # --- PERUBAHAN DI SINI ---
-    # Mengirim harga sebagai ANGKA (float), bukan TEKS (string).
+    # Menggunakan tipe yang benar: TAKE_PROFIT_MARKET untuk TP dan STOP_MARKET untuk SL.
     if tp_price and tp_price > 0:
-        tp_object = {"type": "MARKET", "stopPrice": round(tp_price, 5), "workingType": "MARK_PRICE"}
+        tp_object = {"type": "TAKE_PROFIT_MARKET", "stopPrice": round(tp_price, 5), "workingType": "MARK_PRICE"}
         params['takeProfit'] = json.dumps(tp_object)
 
     if sl_price and sl_price > 0:
-        sl_object = {"type": "MARKET", "stopPrice": round(sl_price, 5), "workingType": "MARK_PRICE"}
+        sl_object = {"type": "STOP_MARKET", "stopPrice": round(sl_price, 5), "workingType": "MARK_PRICE"}
         params['stopLoss'] = json.dumps(sl_object)
 
     sorted_params = sorted(params.items())
@@ -122,6 +122,7 @@ def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, 
         data = response.json()
         
         if data.get('code') == 0:
+            print(f"SUKSES: Order REAL berhasil dibuat: {data}")
             return {'status': 'success', 'order_id': data['data']['order']['orderId'], 'data': data}
         else:
             print("--- DEBUGGING GAGAL ORDER ---")
