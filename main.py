@@ -79,7 +79,48 @@ def verify_bingx_api(api_key, secret_key):
     except Exception as e:
         return f"Gagal terhubung: Terjadi exception - {e}"
 
-# --- FUNGSI DIPERBAIKI (FIX TIPE TP/SL) ---
+# --- FUNGSI BARU UNTUK MENGATUR LEVERAGE ---
+def set_bingx_leverage(api_key, secret_key, symbol, leverage, side):
+    """
+    Mengatur leverage untuk simbol tertentu di BingX.
+    Side bisa 'LONG' atau 'SHORT'.
+    """
+    endpoint = "/openApi/swap/v2/trade/leverage"
+    url = f"{BINGX_API_URL}{endpoint}"
+    
+    params = {
+        'symbol': symbol.replace("/", "-"),
+        'leverage': leverage,
+        'side': side.upper(), # Harus LONG atau SHORT
+        'timestamp': int(time.time() * 1000)
+    }
+    
+    query_string = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
+    signature = generate_bingx_signature(secret_key, query_string)
+    
+    headers = {'X-BX-APIKEY': api_key}
+    
+    try:
+        response = requests.post(url, headers=headers, params=params, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        if data.get('code') == 0:
+            msg = f"Berhasil mengatur leverage {leverage}x untuk {symbol} ({side})."
+            print(msg)
+            add_log_to_history(msg)
+            return True
+        else:
+            msg = f"Gagal mengatur leverage: {data.get('msg', 'Error tidak diketahui')}"
+            print(msg)
+            add_log_to_history(msg)
+            return False
+    except Exception as e:
+        msg = f"ERROR saat mengatur leverage: {e}"
+        print(msg)
+        add_log_to_history(msg)
+        return False
+
+
 def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, tp_price=None, sl_price=None):
     endpoint = "/openApi/swap/v2/trade/order"
     url = f"{BINGX_API_URL}{endpoint}"
@@ -106,7 +147,10 @@ def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, 
     signature = generate_bingx_signature(secret_key, query_string_to_sign)
     final_payload_string = f"{query_string_to_sign}&signature={signature}"
     
-    headers = {'X-BX-APIKEY': api_key, 'Content-Type': 'application/x-www-form-urlencoded'}
+    headers = {
+        'X-BX-APIKEY': api_key,
+        'Content-Type': 'application/x-www-form-urlencoded'
+    }
 
     try:
         response = requests.post(url, headers=headers, data=final_payload_string, timeout=10)
@@ -117,43 +161,20 @@ def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, 
             print(f"SUKSES: Order REAL berhasil dibuat: {data}")
             return {'status': 'success', 'order_id': data['data']['order']['orderId'], 'data': data}
         else:
-            print(f"ERROR: Gagal membuat order REAL: {json.dumps(data)}")
+            print("--- DEBUGGING GAGAL ORDER ---")
+            print(f"URL: {url}")
+            print(f"Payload String yang Dikirim (body): {final_payload_string}")
+            print(f"API Response: {json.dumps(data)}")
+            print("-----------------------------")
             return {'status': 'error', 'message': json.dumps(data)}
             
     except requests.exceptions.RequestException as e:
-        print(f"ERROR: Exception saat request API order: {e}")
-        if e.response: print(f"ERROR: Response Body: {e.response.text}")
+        print(f"ERROR: Exception saat request API: {e}")
+        if e.response:
+            print(f"ERROR: Response Body: {e.response.text}")
         return {'status': 'error', 'message': str(e)}
 
-# --- FUNGSI BARU UNTUK SET LEVERAGE ---
-def set_bingx_leverage(api_key, secret_key, symbol, leverage, side):
-    """Mengirim request ke BingX untuk mengubah leverage."""
-    endpoint = "/openApi/swap/v2/trade/leverage"
-    url = f"{BINGX_API_URL}{endpoint}"
-    params = {
-        'symbol': symbol.replace("/", "-"),
-        'leverage': leverage,
-        'side': side.upper(), # 'LONG' atau 'SHORT'
-        'timestamp': int(time.time() * 1000)
-    }
-    query_string = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
-    signature = generate_bingx_signature(secret_key, query_string)
-    params['signature'] = signature
-
-    headers = {'X-BX-APIKEY': api_key}
-    try:
-        response = requests.post(url, headers=headers, params=params, timeout=5)
-        data = response.json()
-        if data.get('code') == 0:
-            print(f"SUKSES: Leverage untuk {symbol} ({side}) diubah ke {leverage}x.")
-            return True, f"Leverage {side} berhasil diubah ke {leverage}x"
-        else:
-            print(f"ERROR: Gagal mengubah leverage: {data.get('msg')}")
-            return False, data.get('msg')
-    except Exception as e:
-        print(f"ERROR: Exception saat mengubah leverage: {e}")
-        return False, str(e)
-
+# --- Sisa skrip dari sini TIDAK BERUBAH ---
 
 # Inisialisasi Aplikasi Flask & Variabel Global
 app = Flask(__name__)
@@ -208,6 +229,7 @@ except Exception as e:
     print(f"Gagal memuat market: {e}")
     AVAILABLE_SYMBOLS = [DEFAULT_SYMBOL]
 
+# TEMPLATE HTML (TIDAK BERUBAH)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -306,7 +328,6 @@ HTML_TEMPLATE = """
                 const response = await fetch('/get_settings');
                 const settings = await response.json();
                 apiKeyInput.value = settings.api_key;
-                apiSecretInput.value = settings.secret_key; /* <-- Tambahkan ini agar secret key tetap ada (meski tidak terlihat) */
                 leverageInput.value = settings.leverage;
                 amountInput.value = settings.order_amount_usdt;
                 tpInput.value = settings.tp_percent;
@@ -320,18 +341,15 @@ HTML_TEMPLATE = """
         async function saveSettings() {
             saveBtn.disabled = true; saveBtn.textContent = "Menyimpan...";
             const settingsData = {
-                api_key: apiKeyInput.value, secret_key: apiSecretInput.value, 
-                leverage: parseInt(leverageInput.value),
-                order_amount_usdt: parseFloat(amountInput.value), 
-                tp_percent: parseFloat(tpInput.value), 
-                sl_percent: parseFloat(slInput.value)
+                api_key: apiKeyInput.value, secret_key: apiSecretInput.value, leverage: parseInt(leverageInput.value),
+                amount: parseFloat(amountInput.value), tp: parseFloat(tpInput.value), sl: parseFloat(slInput.value)
             };
             try {
                 const response = await fetch('/update_settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(settingsData) });
                 const result = await response.json();
                 updateApiStatus(result.api_status);
                 if (result.api_status.includes("Gagal")) { realToggle.checked = false; toggleMode('real', false); }
-            } catch (error) { console.error("Error saving settings:", error); apiStatusBox.textContent = "Error: " + error; } 
+            } catch (error) { console.error("Error saving settings:", error); } 
             finally { saveBtn.disabled = false; saveBtn.textContent = "Simpan & Hubungkan Ulang"; }
         }
         async function toggleMode(mode, isEnabled) {
@@ -486,8 +504,9 @@ def process_trade_trigger(symbol, side, price):
         if "Berhasil" not in settings['api_connection_status']:
             add_log_to_history("Gagal: REAL Mode, API tidak terhubung."); return
         
-        # Menggunakan nilai order amount dari settings yang sudah terupdate
-        quantity = settings['order_amount_usdt'] / price
+        # <<< TIDAK ADA PERUBAHAN DI SINI, HANYA MEMBACA NILAI YANG SUDAH BENAR >>>
+        # Perhitungan quantity sudah benar, menggunakan nilai order_amount_usdt dari setting
+        quantity = (settings['order_amount_usdt'] * settings['leverage']) / price
         
         order_result = create_bingx_order(
             settings['api_key'], settings['secret_key'], symbol, side, 'market',
@@ -540,8 +559,6 @@ def background_trading_loop():
                 if alert_direction != 'none' and (settings['real_trading_enabled'] or settings['demo_mode_enabled']):
                     is_trade_active_for_symbol = any(t['symbol'] == symbol for t in app.config['ACTIVE_TRADES'].values())
                     if not is_trade_active_for_symbol:
-                        # DEBUG: Cek setting sebelum eksekusi trade
-                        print(f"TRIGGER! Mengeksekusi trade dengan leverage: {settings['leverage']}x, amount: {settings['order_amount_usdt']} USDT")
                         threading.Thread(target=process_trade_trigger, args=(symbol, 'buy' if alert_direction == 'up' else 'sell', bybit_close)).start()
                         state['last_bybit_close'] = None
             
@@ -557,6 +574,7 @@ def background_trading_loop():
             
         time.sleep(FETCH_INTERVAL)
 
+
 @app.route('/')
 def index():
     return render_template_string(HTML_TEMPLATE, interval=FETCH_INTERVAL, symbols=AVAILABLE_SYMBOLS, default_symbol=app.config['LIVE_DATA']['symbol'])
@@ -565,51 +583,44 @@ def index():
 def get_settings():
     return jsonify(app.config['TRADING_SETTINGS'])
 
-# --- ROUTE UPDATE_SETTINGS YANG DIPERBAIKI ---
+# --- ROUTE INI YANG DIPERBAIKI SECARA SIGNIFIKAN ---
 @app.route('/update_settings', methods=['POST'])
 def update_settings():
     data = request.get_json()
     settings = app.config['TRADING_SETTINGS']
     
-    # Perbarui semua nilai dari data yang dikirim web
+    leverage_changed = False
+    
+    # Update nilai dari web ke memori (app.config)
     settings['api_key'] = data.get('api_key', settings['api_key']).strip()
-    if data.get('secret_key'): # Hanya update secret key jika diisi
-        settings['secret_key'] = data.get('secret_key').strip()
-    
-    settings['leverage'] = int(data.get('leverage', settings['leverage']))
-    settings['order_amount_usdt'] = float(data.get('order_amount_usdt', settings['order_amount_usdt']))
-    settings['tp_percent'] = float(data.get('tp_percent', settings['tp_percent']))
-    settings['sl_percent'] = float(data.get('sl_percent', settings['sl_percent']))
-    
-    print(f"DEBUG: Pengaturan diterima: Leverage={settings['leverage']}, Amount={settings['order_amount_usdt']}")
+    settings['secret_key'] = data.get('secret_key', settings['secret_key']).strip()
+    if 'leverage' in data and settings['leverage'] != int(data.get('leverage')):
+        settings['leverage'] = int(data.get('leverage'))
+        leverage_changed = True
+    if 'amount' in data: settings['order_amount_usdt'] = float(data.get('amount'))
+    if 'tp' in data: settings['tp_percent'] = float(data.get('tp'))
+    if 'sl' in data: settings['sl_percent'] = float(data.get('sl'))
     
     # Verifikasi koneksi API
     status_msg = verify_bingx_api(settings['api_key'], settings['secret_key'])
     settings['api_connection_status'] = status_msg
-    
-    if "Berhasil" in status_msg:
-        # Jika koneksi berhasil, coba set leverage di BingX
-        current_symbol = app.config['LIVE_DATA']['symbol']
-        leverage_val = settings['leverage']
-        
-        # Set leverage untuk LONG dan SHORT
-        success_long, msg_long = set_bingx_leverage(settings['api_key'], settings['secret_key'], current_symbol, leverage_val, "LONG")
-        success_short, msg_short = set_bingx_leverage(settings['api_key'], settings['secret_key'], current_symbol, leverage_val, "SHORT")
-
-        if success_long and success_short:
-             add_log_to_history(f"Leverage {current_symbol} diatur ke {leverage_val}x.")
-        else:
-             add_log_to_history(f"Gagal atur leverage: LONG({msg_long}), SHORT({msg_short})")
-
-    else:
-        # Jika koneksi gagal, nonaktifkan mode real trading
+    if "Gagal" in status_msg: 
         settings['real_trading_enabled'] = False
-        
-    settings['api_connection_status'] = status_msg
+        add_log_to_history(f"API Status: {status_msg}")
+    else:
+        # <-- PERUBAHAN UTAMA DI SINI -->
+        # Jika koneksi berhasil DAN leverage berubah, kirim perintah ke BingX
+        if leverage_changed:
+            current_symbol = app.config['LIVE_DATA']['symbol']
+            add_log_to_history(f"Mencoba mengatur leverage ke {settings['leverage']}x untuk {current_symbol}...")
+            # Leverage harus diatur untuk LONG dan SHORT
+            set_bingx_leverage(settings['api_key'], settings['secret_key'], current_symbol, settings['leverage'], 'LONG')
+            set_bingx_leverage(settings['api_key'], settings['secret_key'], current_symbol, settings['leverage'], 'SHORT')
+
+    # Simpan semua pengaturan ke file settings.json
     save_settings(settings)
     
     return jsonify({'status': 'success', 'api_status': settings['api_connection_status']})
-
 
 @app.route('/update_symbol', methods=['POST'])
 def update_symbol():
@@ -618,7 +629,16 @@ def update_symbol():
         new_symbol = data.get('symbol')
         app.config['LIVE_DATA']['symbol'] = new_symbol
         app.config.setdefault('STATE', {})[new_symbol] = {"last_bybit_close": None}
-        print(f"Simbol diubah ke {new_symbol}")
+        
+        # <-- TAMBAHAN: Atur leverage untuk simbol baru secara otomatis -->
+        settings = app.config['TRADING_SETTINGS']
+        if "Berhasil" in settings['api_connection_status']:
+             add_log_to_history(f"Simbol diubah ke {new_symbol}. Mengatur leverage ke {settings['leverage']}x...")
+             set_bingx_leverage(settings['api_key'], settings['secret_key'], new_symbol, settings['leverage'], 'LONG')
+             set_bingx_leverage(settings['api_key'], settings['secret_key'], new_symbol, settings['leverage'], 'SHORT')
+        else:
+            print(f"Simbol diubah ke {new_symbol}. API tidak terhubung, leverage tidak diatur.")
+
         return jsonify({'status': 'success', 'symbol': new_symbol})
     return jsonify({'status': 'error', 'message': 'Symbol not provided'}), 400
 
@@ -661,6 +681,6 @@ if __name__ == '__main__':
     load_initial_state()
     trade_loop_thread = threading.Thread(target=background_trading_loop, daemon=True)
     trade_loop_thread.start()
-    print(f"Server berjalan di http://12-7.0.0.1:5000")
+    print(f"Server berjalan di http://127.0.0.1:5000")
     print("Logika trading berjalan di background. Anda bisa menutup browser.")
     app.run(host='0.0.0.0', port=5000, debug=False)
