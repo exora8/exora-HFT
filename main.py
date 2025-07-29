@@ -15,12 +15,12 @@ DEFAULT_SYMBOL = 'BRETT/USDT'
 FETCH_INTERVAL = 0.5
 TRIGGER_PERCENTAGE = 0.0015
 TRADE_LOG_FILE = 'trades.json'
+SETTINGS_FILE = 'settings.json' # <-- FILE BARU UNTUK SIMPAN SETTING
 MAX_LOG_HISTORY = 20
 
 # --- KONSTANTA API ---
 BYBIT_API_URL = "https://api.bybit.com"
 BINGX_API_URL = "https://open-api.bingx.com"
-
 
 # --- FUNGSI HELPER UNTUK API MANUAL ---
 def generate_bingx_signature(secret_key, params_str):
@@ -96,8 +96,6 @@ def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, 
         'timestamp': int(time.time() * 1000),
     }
     
-    # --- PERUBAHAN DI SINI ---
-    # Menggunakan tipe yang benar: TAKE_PROFIT_MARKET untuk TP dan STOP_MARKET untuk SL.
     if tp_price and tp_price > 0:
         tp_object = {"type": "TAKE_PROFIT_MARKET", "stopPrice": round(tp_price, 5), "workingType": "MARK_PRICE"}
         params['takeProfit'] = json.dumps(tp_object)
@@ -139,10 +137,11 @@ def create_bingx_order(api_key, secret_key, symbol, side, order_type, quantity, 
         return {'status': 'error', 'message': str(e)}
 
 
-# --- Sisa skrip dari sini TIDAK BERUBAH ---
+# --- PERUBAHAN DIMULAI DI SINI ---
 
 # Inisialisasi Aplikasi Flask & Variabel Global
 app = Flask(__name__)
+# Pengaturan default yang akan dioverride oleh file settings.json jika ada
 app.config['TRADING_SETTINGS'] = {
     'api_key': '', 'secret_key': '', 'real_trading_enabled': False, 'demo_mode_enabled': True,
     'order_amount_usdt': 2, 'leverage': 10, 'tp_percent': 0.15, 'sl_percent': 0.15,
@@ -156,6 +155,43 @@ app.config['LIVE_DATA'] = {
     'hft_chance': 0,
 }
 trade_file_lock = threading.Lock()
+
+def save_settings(settings_data):
+    """Menyimpan pengaturan ke file JSON."""
+    try:
+        # Buat salinan untuk dimodifikasi sebelum menyimpan
+        settings_to_save = settings_data.copy()
+        
+        # Hapus state yang tidak perlu disimpan (seperti status koneksi live)
+        if 'api_connection_status' in settings_to_save:
+            del settings_to_save['api_connection_status']
+        
+        with open(SETTINGS_FILE, 'w') as f:
+            json.dump(settings_to_save, f, indent=4)
+        print(f"Pengaturan berhasil disimpan ke {SETTINGS_FILE}")
+    except Exception as e:
+        print(f"ERROR: Gagal menyimpan pengaturan: {e}")
+
+def load_settings():
+    """Membaca pengaturan dari file JSON saat startup."""
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, 'r') as f:
+                saved_settings = json.load(f)
+            # Update pengaturan default dengan yang dari file
+            app.config['TRADING_SETTINGS'].update(saved_settings)
+            
+            # Reset state live untuk keamanan saat startup
+            app.config['TRADING_SETTINGS']['api_connection_status'] = 'Belum terhubung'
+            app.config['TRADING_SETTINGS']['real_trading_enabled'] = False
+
+            print(f"Berhasil memuat pengaturan dari {SETTINGS_FILE}")
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            print(f"Gagal memuat {SETTINGS_FILE} ({e}), menggunakan pengaturan default.")
+    else:
+        print(f"File {SETTINGS_FILE} tidak ditemukan, menggunakan pengaturan default.")
+
+# --- AKHIR DARI PERUBAHAN FUNGSI ---
 
 # Inisialisasi Daftar Simbol
 try:
@@ -546,6 +582,9 @@ def update_settings():
             settings['real_trading_enabled'] = False
         add_log_to_history(f"API Status: {status_msg}")
     
+    # --- PERUBAHAN DI SINI: PANGGIL FUNGSI SIMPAN ---
+    save_settings(settings)
+    
     return jsonify({'status': 'success', 'api_status': settings['api_connection_status']})
 
 @app.route('/update_symbol', methods=['POST'])
@@ -584,6 +623,9 @@ def toggle_mode():
             add_log_to_history("Mode DEMO diaktifkan.")
         else:
             add_log_to_history("Mode DEMO dinonaktifkan.")
+
+    # --- PERUBAHAN DI SINI: PANGGIL FUNGSI SIMPAN SETELAH TOGGLE MODE ---
+    save_settings(settings)
             
     return jsonify(settings)
 
@@ -594,6 +636,9 @@ def data():
     return jsonify(response_data)
 
 if __name__ == '__main__':
+    # --- PERUBAHAN DI SINI: PANGGIL FUNGSI LOAD SEBELUM MENJALANKAN ---
+    load_settings()
+    
     load_initial_state()
     trade_loop_thread = threading.Thread(target=background_trading_loop, daemon=True)
     trade_loop_thread.start()
